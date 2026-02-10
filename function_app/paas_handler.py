@@ -78,21 +78,28 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
             pe.private_link_service_connections[0]
             .private_link_service_id
         )
-        try:
-            parent_resource = resource_client.resources.get_by_id(
-                linked_resource_id, api_version="2023-01-01"
-            )
-            tags = parent_resource.tags or {}
-            logging.info(
-                f"Parent PaaS resource tags: {tags} "
-                f"(from {linked_resource_id})"
-            )
-        except Exception as e:
-            logging.warning(
-                f"Could not read parent resource tags: {e}. "
-                f"Falling back to PE tags."
-            )
-            tags = pe.tags or {}
+        # Try multiple API versions for broader compatibility
+        api_versions = ["2023-01-01", "2022-09-01", "2021-04-01"]
+        for api_version in api_versions:
+            try:
+                parent_resource = resource_client.resources.get_by_id(
+                    linked_resource_id, api_version=api_version
+                )
+                tags = parent_resource.tags or {}
+                logging.info(
+                    f"Parent PaaS resource tags: {tags} "
+                    f"(from {linked_resource_id}, API version: {api_version})"
+                )
+                break  # Success, exit the loop
+            except Exception as e:
+                if api_version == api_versions[-1]:
+                    # Last attempt failed
+                    logging.warning(
+                        f"Could not read parent resource tags with any API version: {e}. "
+                        f"Falling back to PE tags."
+                    )
+                    tags = pe.tags or {}
+                # Otherwise, try next API version
     else:
         tags = pe.tags or {}
 
@@ -108,7 +115,14 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
         nic_name = nic_parsed.get("networkInterfaces")
         nic_rg = nic_parsed.get("resourceGroups")
 
-        nic = network_client.network_interfaces.get(nic_rg, nic_name)
+        try:
+            nic = network_client.network_interfaces.get(nic_rg, nic_name)
+        except Exception as e:
+            logging.error(
+                f"Failed to get NIC '{nic_name}' in resource group "
+                f"'{nic_rg}': {e}"
+            )
+            continue
 
         for ip_config in nic.ip_configurations:
             subnet_id = ip_config.subnet.id
@@ -117,9 +131,16 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
             subnet_name = subnet_parsed.get("subnets")
             subnet_rg = subnet_parsed.get("resourceGroups")
 
-            subnet = network_client.subnets.get(
-                subnet_rg, vnet_name, subnet_name
-            )
+            try:
+                subnet = network_client.subnets.get(
+                    subnet_rg, vnet_name, subnet_name
+                )
+            except Exception as e:
+                logging.error(
+                    f"Failed to get subnet '{subnet_name}' in VNet "
+                    f"'{vnet_name}': {e}"
+                )
+                continue
 
             if not subnet.network_security_group:
                 logging.warning(
