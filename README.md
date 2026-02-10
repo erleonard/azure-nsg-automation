@@ -1,15 +1,25 @@
 # Azure NSG Tag-Based Automation
 
-An event-driven automation solution that dynamically assigns Azure Network Security Group (NSG) rules based on Virtual Machine tags. The solution uses Azure Event Grid to capture VM create/update events and an Azure Function to evaluate tags and apply corresponding NSG rules.
+An event-driven automation solution that dynamically assigns Azure Network Security Group (NSG) rules based on resource tags. The solution supports both **Virtual Machines** and **PaaS services with Private Endpoints**. It uses Azure Event Grid to capture resource create/update events and Azure Functions to evaluate tags and apply corresponding NSG rules.
 
 ## What This Solution Does
 
-This solution automates the management of NSG rules based on VM tagging:
+This solution automates the management of NSG rules based on resource tagging:
+
+### For Virtual Machines
 1. When a VM is created or its tags are updated, Event Grid captures the event
 2. An Azure Function is triggered automatically
 3. The function reads the VM's tags and looks up matching NSG rules from a centralized configuration
 4. It applies the appropriate NSG rules to the VM's network interface or subnet NSG
 5. All operations are idempotent, ensuring safety even with repeated events
+
+### For PaaS Services with Private Endpoints
+1. When a Private Endpoint is created or updated, Event Grid captures the event
+2. A dedicated Azure Function is triggered automatically
+3. The function traverses from the Private Endpoint to the parent PaaS resource (e.g., Azure SQL, Storage)
+4. It reads tags from the parent PaaS resource (tags don't auto-propagate to Private Endpoints)
+5. It applies matching NSG rules to the **subnet-level NSG** where the Private Endpoint resides
+6. All operations are idempotent and support multiple Private Endpoints per subnet
 
 ## Architecture Overview
 
@@ -34,16 +44,17 @@ This solution automates the management of NSG rules based on VM tagging:
 - Topic Type: `Microsoft.Resources.Subscriptions`
 - Captures resource write events across the subscription
 
-### Event Grid Subscription
-- Filters for `Microsoft.Resources.ResourceWriteSuccess` events
-- Advanced filter: Only processes `Microsoft.Compute/virtualMachines` subjects
-- Destination: Azure Function endpoint
+### Event Grid Subscriptions
+- **VM Subscription**: Filters for `Microsoft.Resources.ResourceWriteSuccess` events with `Microsoft.Compute/virtualMachines` subjects
+- **Private Endpoint Subscription**: Filters for `Microsoft.Resources.ResourceWriteSuccess` events with `Microsoft.Network/privateEndpoints` subjects
+- Destination: Azure Function endpoints
 
-### Azure Function
+### Azure Functions
 - Runtime: Python 3.11
 - Trigger: Event Grid
 - Authentication: System-Assigned Managed Identity
-- Processes VM events and applies NSG rules based on tags
+- **VM Handler** (`nsg_tag_handler`): Processes VM events and applies NSG rules based on VM tags
+- **PaaS Handler** (`PaasNsgTagHandler`): Processes Private Endpoint events, reads parent PaaS resource tags, and applies NSG rules to subnet NSGs
 
 ### Network Security Groups (NSGs)
 - Can be attached at NIC level or subnet level
@@ -52,7 +63,9 @@ This solution automates the management of NSG rules based on VM tagging:
 
 ### Managed Identity
 - System-assigned identity for the Function App
-- RBAC roles: Reader (subscription), Network Contributor (NSG modifications)
+- RBAC roles: 
+  - **Reader** (subscription): Read VM details, tags, and PaaS resource tags
+  - **Network Contributor** (subscription): Modify NSG rules
 - No credential management required
 
 ### Log Analytics / Application Insights
@@ -64,6 +77,121 @@ This solution automates the management of NSG rules based on VM tagging:
 - Centralized mapping of tags to NSG rules
 - Can be updated without code changes
 - Supports multiple tag-based rules
+- Each tag match can define multiple NSG rules (e.g., deny + allow rules for defense-in-depth)
+
+## PaaS and Private Endpoint Support
+
+### How It Works
+
+The solution extends support to **PaaS services that use Private Endpoints**. When a Private Endpoint is created or updated:
+
+1. **Event Capture**: Event Grid captures the Private Endpoint create/update event
+2. **Parent Resource Discovery**: The PaaS handler traverses from the Private Endpoint to the parent PaaS resource (e.g., Azure SQL, Storage Account, Key Vault)
+3. **Tag Reading**: Tags are read from the parent PaaS resource (tags do NOT auto-propagate from PaaS resources to Private Endpoint NICs)
+4. **Subnet NSG Application**: Matching NSG rules are applied to the **subnet-level NSG** where the Private Endpoint's NIC resides
+5. **Idempotent Updates**: All operations are idempotent and safe for repeated events
+
+### Key Differences from VM Handler
+
+| Aspect | VM Handler | PaaS/Private Endpoint Handler |
+|--------|-----------|-------------------------------|
+| **Tag Source** | Directly from VM resource | Parent PaaS resource (tags don't propagate to PE) |
+| **NSG Scope** | NIC-level or subnet-level | Subnet-level only (NIC-level NSG for PEs is in preview) |
+| **Event Filter** | `Microsoft.Compute/virtualMachines` | `Microsoft.Network/privateEndpoints` |
+| **Resource Traversal** | Direct VM → NIC → NSG | PE → Parent PaaS → Tags, PE → NIC → Subnet → NSG |
+
+### Supported PaaS Services
+
+Any Azure service that supports Private Link can be used with this solution:
+- **Azure SQL Database** / SQL Managed Instance
+- **Azure Storage** (Blob, File, Queue, Table)
+- **Azure Key Vault**
+- **Azure Cosmos DB**
+- **Azure App Service** (Web Apps)
+- **Azure Container Registry**
+- **Azure Cognitive Services**
+- And many more Private Link-enabled services
+
+### Important Considerations
+
+⚠️ **Tag Propagation**: Tags on PaaS resources do NOT automatically propagate to Private Endpoints or their NICs. The function must traverse back to the parent PaaS resource to read tags.
+
+⚠️ **NSG Scope**: NSG rules are applied at the **subnet level** for Private Endpoints. NIC-level NSG support for Private Endpoints is still expanding in preview. This means:
+- All Private Endpoints in the same subnet share the same NSG rules
+- Changes affect all endpoints in the subnet
+
+⚠️ **Shared Subnets**: If multiple Private Endpoints share a subnet, NSG rule changes affect all of them. Best practices:
+- Use dedicated subnets per service tier or tag category (e.g., separate subnets for `DataTier=Restricted` vs `DataTier=Standard`)
+- Plan subnet CIDR ranges accordingly to accommodate dedicated subnets
+- Document which subnets are used for which service tiers
+
+⚠️ **RBAC Requirements**: The Function's Managed Identity needs:
+- **Reader** role on the subscription (or resource groups) to read PaaS resource tags
+- **Network Contributor** role to modify NSG rules
+
+### Example: SQL Database with Restricted Access
+
+For an Azure SQL Database tagged with `DataTier=Restricted`:
+
+```json
+{
+  "tag_key": "DataTier",
+  "tag_value": "Restricted",
+  "nsg_rules": [
+    {
+      "name": "Deny-Public-to-Restricted-SQL",
+      "priority": 100,
+      "direction": "Inbound",
+      "access": "Deny",
+      "protocol": "*",
+      "source_address_prefix": "Internet",
+      "destination_port_range": "1433",
+      "destination_address_prefix": "*",
+      "source_port_range": "*"
+    },
+    {
+      "name": "Allow-AppSubnet-to-SQL",
+      "priority": 150,
+      "direction": "Inbound",
+      "access": "Allow",
+      "protocol": "Tcp",
+      "source_address_prefix": "10.10.50.0/24",
+      "destination_port_range": "1433",
+      "destination_address_prefix": "*",
+      "source_port_range": "*"
+    }
+  ]
+}
+```
+
+This configuration:
+1. Denies all Internet traffic to SQL port 1433 (priority 100)
+2. Allows traffic from application subnet 10.10.50.0/24 to SQL (priority 150)
+3. Implements defense-in-depth: explicit deny + explicit allow
+
+### Event Flow for Private Endpoints
+
+```
+Private Endpoint Created
+         ↓
+Event Grid System Topic (Microsoft.Network/privateEndpoints)
+         ↓
+PaasNsgTagHandler Function Triggered
+         ↓
+Read Private Endpoint Details (NIC, Subnet)
+         ↓
+Traverse to Parent PaaS Resource (privateLinkServiceConnections)
+         ↓
+Read Tags from Parent PaaS Resource
+         ↓
+Match Tags Against tag-nsg-mapping.json
+         ↓
+Locate Subnet NSG
+         ↓
+Apply NSG Rules to Subnet NSG (idempotent)
+         ↓
+Log Success/Failure
+```
 
 ## Prerequisites
 
