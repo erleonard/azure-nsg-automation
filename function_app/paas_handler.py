@@ -110,6 +110,13 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
         return
 
     # 4. Find the PE's subnet and its NSG
+    if not pe.network_interfaces:
+        logging.warning(
+            f"Private Endpoint '{pe_name}' has no network interfaces. "
+            f"Cannot apply NSG rules."
+        )
+        return
+    
     for nic_ref in pe.network_interfaces:
         nic_parsed = parse_resource_id(nic_ref.id)
         nic_name = nic_parsed.get("networkInterfaces")
@@ -121,6 +128,12 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
             logging.error(
                 f"Failed to get NIC '{nic_name}' in resource group "
                 f"'{nic_rg}': {e}"
+            )
+            continue
+
+        if not nic.ip_configurations:
+            logging.warning(
+                f"NIC '{nic_name}' has no IP configurations. Skipping."
             )
             continue
 
