@@ -73,7 +73,7 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
     # 2. Get the parent PaaS resource and its tags
     #    (PE -> privateLinkServiceConnections -> linked resource)
     tags = {}
-    if pe.private_link_service_connections:
+    if pe.private_link_service_connections and len(pe.private_link_service_connections) > 0:
         linked_resource_id = (
             pe.private_link_service_connections[0]
             .private_link_service_id
@@ -125,6 +125,12 @@ def paas_nsg_tag_handler(event: func.EventGridEvent):
             continue
 
         for ip_config in nic.ip_configurations:
+            if not ip_config.subnet:
+                logging.warning(
+                    f"IP configuration has no subnet for PE '{pe_name}'. Skipping."
+                )
+                continue
+            
             subnet_id = ip_config.subnet.id
             subnet_parsed = parse_resource_id(subnet_id)
             vnet_name = subnet_parsed.get("virtualNetworks")
