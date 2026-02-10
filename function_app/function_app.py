@@ -62,8 +62,8 @@ def get_matching_rules(tags: Dict[str, str]) -> List[Dict]:
         tag_value = rule_config.get('tag_value')
         
         if tag_key in tags and tags[tag_key] == tag_value:
-            matching_rules.append(rule_config.get('nsg_rule'))
-            logging.info(f"Matched rule for tag {tag_key}={tag_value}: {rule_config['nsg_rule']['name']}")
+            matching_rules.extend(rule_config.get('nsg_rules', []))
+            logging.info(f"Matched {len(rule_config.get('nsg_rules', []))} rule(s) for tag {tag_key}={tag_value}")
     
     return matching_rules
 
