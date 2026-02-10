@@ -62,8 +62,10 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: python-app
+          path: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
 
       - name: Unzip artifact for deployment
+        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
         run: |
           unzip release.zip
           rm release.zip
@@ -84,5 +86,6 @@ jobs:
           package: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
 
           
+
 
 
